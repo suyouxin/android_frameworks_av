@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-//#define LOG_NDEBUG 0
+// #define LOG_NDEBUG 0
 #define LOG_TAG "ACodec"
 
 #ifdef __LP64__
@@ -27,6 +27,7 @@
 #include <media/stagefright/ACodec.h>
 
 #include <binder/MemoryDealer.h>
+#include <binder/MemoryBase.h>
 
 #include <media/stagefright/foundation/hexdump.h>
 #include <media/stagefright/foundation/ABuffer.h>
@@ -445,6 +446,42 @@ ACodec::ACodec()
 ACodec::~ACodec() {
 }
 
+status_t ACodec::initOutputBufferInfo(){
+    if (mNativeWindow == NULL){
+        return UNKNOWN_ERROR;
+    }
+    OMX_PARAM_PORTDEFINITIONTYPE def;
+    InitOMXParams(&def);
+    def.nPortIndex = kPortIndexOutput;
+
+    status_t err = mOMX->getParameter(
+            mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
+    if (err != OK) {
+        return err;
+    }
+    int minUndequeuedBufs = 0;
+    err = mNativeWindow->query(mNativeWindow.get(),
+            NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS, &minUndequeuedBufs);
+    if (err != 0) {
+        ALOGE("NATIVE_WINDOW_MIN_UNDEQUEUED_BUFFERS query failed: %s (%d)",
+                strerror(-err), -err);
+        return err;
+    }
+
+    if (def.nBufferCountActual < def.nBufferCountMin + minUndequeuedBufs) {
+        OMX_U32 newBufferCount = def.nBufferCountMin + minUndequeuedBufs;
+        def.nBufferCountActual = newBufferCount;
+        err = mOMX->setParameter(
+                mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
+        if (err != OK) {
+            ALOGE("setting nBufferCountActual to %lu failed: %d",
+                    newBufferCount, err);
+            return err;
+        }
+    }
+    return OK;
+}
+
 void ACodec::setNotificationMessage(const sp<AMessage> &msg) {
     mNotify = msg;
 }
@@ -542,16 +579,35 @@ status_t ACodec::allocateBuffersOnPort(OMX_U32 portIndex) {
                 mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
 
         if (err == OK) {
+            size_t defBufSzActual = (def.nBufferSize+getpagesize()-1)&~(getpagesize()-1);//getpagesize() return 4096 currently
             ALOGV("[%s] Allocating %u buffers of size %u on %s port",
                     mComponentName.c_str(),
                     def.nBufferCountActual, def.nBufferSize,
                     portIndex == kPortIndexInput ? "input" : "output");
 
             size_t totalSize = def.nBufferCountActual * def.nBufferSize;
-            mDealer[portIndex] = new MemoryDealer(totalSize, "ACodec");
+			if (!strncmp(mComponentName.c_str(), "OMX.MARVELL.VIDEO.VMETA", 18)) {
+				sp<MemoryHeapBase> heap = new MemoryHeapBase("/dev/ion", totalSize, MemoryHeapBase::NO_CACHING);
+				if (heap->heapID() < 0) {
+					ALOGE("Failed to allocate ion memory from %s", "/dev/ion");
+					return UNKNOWN_ERROR;
+				} else {
+					mIOMXHeap[portIndex] = heap;
+				}
+			} else {
+				mDealer[portIndex] = new MemoryDealer(totalSize, "ACodec");
+			}
+
+            // mDealer[portIndex] = new MemoryDealer(totalSize, "ACodec");
 
             for (OMX_U32 i = 0; i < def.nBufferCountActual; ++i) {
-                sp<IMemory> mem = mDealer[portIndex]->allocate(def.nBufferSize);
+				sp<IMemory> mem;
+				if (!strncmp(mComponentName.c_str(), "OMX.MARVELL.VIDEO.VMETA", 18)) {
+					mem = new MemoryBase(mIOMXHeap[portIndex], i * defBufSzActual, defBufSzActual);
+				} else {
+					mem = mDealer[portIndex]->allocate(def.nBufferSize);
+				}
+                // sp<IMemory> mem = mDealer[portIndex]->allocate(def.nBufferSize);
                 CHECK(mem.get() != NULL);
 
                 BufferInfo info;
@@ -627,12 +683,25 @@ status_t ACodec::configureOutputBuffersFromNativeWindow(
     if (err != OK) {
         return err;
     }
-
+    int halFmt = 0;
+    //remapping the color format for mrvl native window implementation
+    if(OMX_COLOR_FormatYUV420Planar == def.format.video.eColorFormat){
+        halFmt = HAL_PIXEL_FORMAT_YCbCr_420_P; // YUV420
+        ALOGI("Native Window Buffer Geometry %lu.%lu - OMX_COLOR_FormatYUV420Planar", def.format.video.nFrameWidth, def.format.video.nFrameHeight);
+    }else if(OMX_COLOR_FormatYUV420SemiPlanar == def.format.video.eColorFormat){
+        halFmt = HAL_PIXEL_FORMAT_YCbCr_420_SP_MRVL; // NV12
+        ALOGI("Native Window Buffer Geometry %lu.%lu - OMX_COLOR_FormatYUV420SemiPlanar", def.format.video.nFrameWidth, def.format.video.nFrameHeight);
+    }else if(OMX_COLOR_FormatCbYCrY == def.format.video.eColorFormat){
+       halFmt = HAL_PIXEL_FORMAT_CbYCrY_422_I; // UYVY
+       ALOGI("Native Window Buffer Geometry %lu.%lu - OMX_COLOR_FormatCbYCrY", def.format.video.nFrameWidth, def.format.video.nFrameHeight);
+    }else{
+        ALOGE("Not support/mapped color format %d!!!", def.format.video.eColorFormat);
+    }
     err = native_window_set_buffers_geometry(
             mNativeWindow.get(),
             def.format.video.nFrameWidth,
             def.format.video.nFrameHeight,
-            def.format.video.eColorFormat);
+            halFmt);
 
     if (err != 0) {
         ALOGE("native_window_set_buffers_geometry failed: %s (%d)",
@@ -1718,10 +1787,11 @@ status_t ACodec::setupAACCodec(
     profile.nChannels = numChannels;
     profile.nSampleRate = sampleRate;
 
-    profile.eAACStreamFormat =
-        isADTS
-            ? OMX_AUDIO_AACStreamFormatMP4ADTS
-            : OMX_AUDIO_AACStreamFormatMP4FF;
+	profile.eAACStreamFormat = OMX_AUDIO_AACStreamFormatMP4ADTS;
+    // profile.eAACStreamFormat =
+        // isADTS
+            // ? OMX_AUDIO_AACStreamFormatMP4ADTS
+            // : OMX_AUDIO_AACStreamFormatMP4FF;
 
     OMX_AUDIO_PARAM_ANDROID_AACPRESENTATIONTYPE presentation;
     presentation.nMaxOutputChannels = maxOutputChannelCount;
@@ -3032,6 +3102,7 @@ bool ACodec::describeDefaultColorFormat(DescribeColorFormatParams &params) {
     if (fmt != OMX_COLOR_FormatYUV420Planar &&
         fmt != OMX_COLOR_FormatYUV420PackedPlanar &&
         fmt != OMX_COLOR_FormatYUV420SemiPlanar &&
+        // fmt != OMX_COLOR_FormatCbYCrY &&
         fmt != OMX_COLOR_FormatYUV420PackedSemiPlanar) {
         ALOGW("do not know color format 0x%x = %d", fmt, fmt);
         return false;
@@ -5389,6 +5460,7 @@ bool ACodec::OutputPortSettingsChangedState::onOMXEvent(
                 CHECK(mCodec->mBuffers[kPortIndexOutput].isEmpty());
                 mCodec->mDealer[kPortIndexOutput].clear();
 
+                mCodec->initOutputBufferInfo();
                 CHECK_EQ(mCodec->mOMX->sendCommand(
                             mCodec->mNode, OMX_CommandPortEnable, kPortIndexOutput),
                          (status_t)OK);

@@ -173,6 +173,13 @@ enum {
     kKeyTrackIsDefault    = 'dflt', // bool (int32_t)
     // Similar to MediaFormat.KEY_IS_FORCED_SUBTITLE but pertains to av tracks as well.
     kKeyTrackIsForced     = 'frcd', // bool (int32_t)
+
+    kKeyIMemPointer   = 'imem',  // imem pointer
+    kKeyRawCodecSpecificData = 'rcsd', //raw data
+    kKeyMpeg4GMCWrapPoint = 'gmcw', //mpeg4 gmc wrap point
+    kKeyRecommendOutputCount    = 'outc', //Recommend minimum output buffer count.
+    kKeyFrameSizeMRVL  = 'frsz', //number of bytes in one frame
+    kKey263AdvancedFeatures = '263A', // Indicate H.263 has advanced features.
 };
 
 enum {

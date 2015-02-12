@@ -256,6 +256,31 @@ static VideoFrame *extractVideoFrameWithCodecFlags(
     CHECK(meta->findInt32(kKeyWidth, &width));
     CHECK(meta->findInt32(kKeyHeight, &height));
 
+    int32_t decodedWidth = width;
+    int32_t decodedHeight = height;
+
+    if(meta->findInt32(kKeyStride, &decodedWidth)){
+        int32_t Format;
+        CHECK(meta->findInt32(kKeyColorFormat, &Format));
+        if (OMX_COLOR_FormatCbYCrY == Format|| OMX_COLOR_FormatYCbYCr == Format){
+            /* convert bytes to pixel */
+            decodedWidth = decodedWidth >> 1;
+        }
+        if (decodedWidth < width){
+            decodedWidth = width;
+        }
+    }else{
+        decodedWidth = width;
+    }
+
+    if(meta->findInt32(kKeySliceHeight, &decodedHeight)){
+        if (height > decodedHeight){
+            decodedHeight = height;
+        }
+    }else{
+        decodedHeight = height;
+    }
+
     int32_t crop_left, crop_top, crop_right, crop_bottom;
     if (!meta->findRect(
                 kKeyCropRect,
@@ -296,7 +321,7 @@ static VideoFrame *extractVideoFrameWithCodecFlags(
     if (converter.isValid()) {
         err = converter.convert(
                 (const uint8_t *)buffer->data() + buffer->range_offset(),
-                width, height,
+                decodedWidth, decodedHeight,
                 crop_left, crop_top, crop_right, crop_bottom,
                 frame->mData,
                 frame->mWidth,

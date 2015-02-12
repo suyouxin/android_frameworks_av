@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 #define LOG_TAG "OMXNodeInstance"
 #include <utils/Log.h>
 
@@ -29,6 +29,14 @@
 #include <HardwareAPI.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/MediaErrors.h>
+#include "gralloc_priv.h"
+#include "gralloc.h"
+#include "OMX_IppDef.h"
+
+#include <linux/ion.h>
+#include <linux/pxa_ion.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
 
 static const OMX_U32 kPortIndexInput = 0;
 
@@ -330,10 +338,12 @@ status_t OMXNodeInstance::enableGraphicBuffers(
 
     if (err != OMX_ErrorNone) {
         if (enable) {
-            ALOGE("OMX_GetExtensionIndex %s failed", name);
+            //ALOGE("OMX_GetExtensionIndex %s failed", name);
         }
 
-        return StatusFromOMXError(err);
+        //return StatusFromOMXError(err);
+        ALOGI("OMX_GetExtensionIndex OMX.google.android.index.enableAndroidNativeBuffers failed, turn to mrvl method");
+        return OK;
     }
 
     OMX_VERSIONTYPE ver;
@@ -367,9 +377,12 @@ status_t OMXNodeInstance::getGraphicBufferUsage(
     OMX_ERRORTYPE err = OMX_GetExtensionIndex(mHandle, name, &index);
 
     if (err != OMX_ErrorNone) {
-        ALOGE("OMX_GetExtensionIndex %s failed", name);
+        //ALOGE("OMX_GetExtensionIndex %s failed", name);
 
-        return StatusFromOMXError(err);
+        //return StatusFromOMXError(err);
+        ALOGI("OMX_GetExtensionIndex OMX.google.android.index.getAndroidNativeBufferUsage failed, turn to mrvl method");
+        *usage |= GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_PRIVATE_3 | GRALLOC_USAGE_HW_2D;
+        return OK;
     }
 
     OMX_VERSIONTYPE ver;
@@ -554,6 +567,67 @@ status_t OMXNodeInstance::useBuffer(
 
     CHECK_EQ(header->pAppPrivate, buffer_meta);
 
+    OMX_PARAM_PORTDEFINITIONTYPE def;
+    def.nSize = sizeof(OMX_PARAM_PORTDEFINITIONTYPE);
+    def.nVersion.s.nVersionMajor = 1;
+    def.nVersion.s.nVersionMinor = 0;
+    def.nVersion.s.nRevision = 0;
+    def.nVersion.s.nStep = 0;
+    def.nPortIndex = portIndex;
+
+    err = OMX_GetParameter(mHandle, OMX_IndexParamPortDefinition, &def);
+    if (err != OMX_ErrorNone)
+    {
+        ALOGE("%s::%d:Error getting OMX_IndexParamPortDefinition", __FUNCTION__, __LINE__);
+        return err;
+    }
+
+    if (OMX_TRUE == def.bBuffersContiguous) {
+        sp<IMemory> mem = params;
+        sp<IMemoryHeap> heap = mem->getMemory();
+        void *va_base = NULL;
+        OMX_S32 offset;
+        int fd, ret;
+        fd = open("/dev/ion", O_RDWR);
+        if (fd < 0) {
+            ALOGE("failed to open /dev/ion, ret:%d", fd);
+            return UNKNOWN_ERROR;
+        }
+
+        /* import buffer fd to get handle */
+        struct ion_fd_data req_fd;
+        memset(&req_fd, 0, sizeof(struct ion_fd_data));
+        req_fd.fd = heap->getHeapID();
+        ret = ioctl(fd, ION_IOC_IMPORT, &req_fd);
+        if (ret < 0) {
+            close(fd);
+            ALOGE("failed to import buffer fd:%d, ret:%d", req_fd.fd, ret);
+            return UNKNOWN_ERROR;
+        }
+        /* fetch physical address */
+        struct ion_custom_data data;
+        struct ion_pxa_region ion_region;
+        memset(&ion_region, 0, sizeof(ion_pxa_region));
+        memset(&data, 0, sizeof(struct ion_custom_data));
+        ion_region.handle = req_fd.handle;
+        data.cmd = ION_PXA_PHYS;
+        data.arg = (unsigned long)&ion_region;
+        ret = ioctl(fd, ION_IOC_CUSTOM, &data);
+        if (ret < 0) {
+            close(fd);
+            ALOGE("failed to get physical address from ION, return error:%d", ret);
+            return UNKNOWN_ERROR;
+        }
+        close(fd);
+        va_base = heap->getBase();
+        offset = header->pBuffer + header->nOffset - (OMX_U8*)va_base;
+        ((OMX_BUFFERHEADERTYPE_IPPEXT*)header)->nPhyAddr = offset + ion_region.addr;
+
+        char componentName[128] = {0};
+        OMX_GetComponentVersion(mHandle, componentName, NULL, NULL, NULL);
+        ALOGD("[%s] useBuffer(port %d) from ion: nPhyAddr = %p\n", componentName, portIndex, ((OMX_BUFFERHEADERTYPE_IPPEXT*)header)->nPhyAddr);
+    }
+
     *buffer = makeBufferID(header);
 
     addActiveBuffer(portIndex, *buffer);
@@ -639,9 +713,45 @@ status_t OMXNodeInstance::useGraphicBuffer(
     OMX_ERRORTYPE err = OMX_GetExtensionIndex(mHandle, name, &index);
 
     if (err != OMX_ErrorNone) {
-        ALOGE("OMX_GetExtensionIndex %s failed", name);
+        //ALOGE("OMX_GetExtensionIndex %s failed", name);
 
-        return StatusFromOMXError(err);
+        //return StatusFromOMXError(err);
+        // our OMXIL do not support getAndroidNativeBufferUsage index
+        BufferMeta *bufferMeta = new BufferMeta(graphicBuffer);
+        OMX_BUFFERHEADERTYPE *header;
+        void* va;
+
+        android_native_buffer_t* bufHandle = graphicBuffer->getNativeBuffer();
+        private_handle_t *priHandle = private_handle_t::dynamicCast(bufHandle->handle);
+
+        unsigned long paddr = priHandle->physAddr;
+        int size = priHandle->size;
+
+        OMX_U32 usage = GRALLOC_USAGE_HW_RENDER;//Below lock/unlock is just to get va, and needn't cache flush operation. Therefore, set usage as HW_RENDER, it inform unlock() not to do cache flush.
+
+        graphicBuffer->lock(usage, &va);
+        OMX_ERRORTYPE err = OMX_UseBuffer(mHandle, &header, portIndex, bufferMeta ,size, (OMX_U8*)va);
+        graphicBuffer->unlock();
+
+        if (err != OMX_ErrorNone) {
+            ALOGE("Mrvl OMX_UseBuffer failed with error %d (0x%08x)", err, err);
+            delete bufferMeta;
+            bufferMeta = NULL;
+            *buffer = 0;
+            return UNKNOWN_ERROR;
+        }
+        CHECK_EQ(header->pAppPrivate, bufferMeta);
+
+        char componentName[128];
+        OMX_GetComponentVersion(mHandle, componentName, NULL, NULL, NULL);
+        if (!strncmp(componentName, "OMX.MARVELL.VIDEO.", 18)) {
+            ((OMX_BUFFERHEADERTYPE_IPPEXT*)header)->nPhyAddr = (OMX_U32)(paddr);
+        }
+        *buffer = makeBufferID(header);
+
+        addActiveBuffer(portIndex, *buffer);
+
+        return OK;
     }
 
     BufferMeta *bufferMeta = new BufferMeta(graphicBuffer);

@@ -32,6 +32,7 @@ namespace android {
 
 struct ABuffer;
 struct MemoryDealer;
+struct MemoryHeapBase;
 struct DescribeColorFormatParams;
 
 struct ACodec : public AHierarchicalStateMachine, public CodecBase {
@@ -178,6 +179,7 @@ private:
     sp<IOMX> mOMX;
     IOMX::node_id mNode;
     sp<MemoryDealer> mDealer[2];
+    sp<MemoryHeapBase> mIOMXHeap[2];
 
     sp<ANativeWindow> mNativeWindow;
     sp<AMessage> mInputFormat;
@@ -235,6 +237,7 @@ private:
     status_t cancelBufferToNativeWindow(BufferInfo *info);
     status_t freeOutputBuffersNotOwnedByComponent();
     BufferInfo *dequeueBufferFromNativeWindow();
+    status_t initOutputBufferInfo();
 
     BufferInfo *findBufferByID(
             uint32_t portIndex, IOMX::buffer_id bufferID,

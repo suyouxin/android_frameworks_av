@@ -41,7 +41,7 @@ SoftOMXComponent::SoftOMXComponent(
     mComponent->pComponentPrivate = this;
     mComponent->pApplicationPrivate = appData;
 
-    mComponent->GetComponentVersion = NULL;
+    mComponent->GetComponentVersion = GetComponentVersionWrapper;
     mComponent->SendCommand = SendCommandWrapper;
     mComponent->GetParameter = GetParameterWrapper;
     mComponent->SetParameter = SetParameterWrapper;
@@ -254,6 +254,30 @@ OMX_ERRORTYPE SoftOMXComponent::GetStateWrapper(
     return me->getState(state);
 }
 
+//static
+OMX_ERRORTYPE SoftOMXComponent::GetComponentVersionWrapper(
+        OMX_HANDLETYPE component,
+        OMX_STRING pComponentName,
+        OMX_VERSIONTYPE* pComponentVersion,
+        OMX_VERSIONTYPE* pSpecVersion,
+        OMX_UUIDTYPE* pComponentUUID) {
+    SoftOMXComponent *me =
+        (SoftOMXComponent *)
+            ((OMX_COMPONENTTYPE *)component)->pComponentPrivate;
+    if (NULL != pComponentName) {
+        strcpy(pComponentName, me->name());
+    }
+    if (NULL != pComponentVersion) {
+        return OMX_ErrorUndefined;
+    }
+    if (NULL != pSpecVersion) {
+        return OMX_ErrorUndefined;
+    }
+    if (NULL != pComponentUUID) {
+        return OMX_ErrorUndefined;
+    }
+    return OMX_ErrorNone;
+}
 ////////////////////////////////////////////////////////////////////////////////
 
 OMX_ERRORTYPE SoftOMXComponent::sendCommand(

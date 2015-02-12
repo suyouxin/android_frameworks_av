@@ -30,6 +30,7 @@ namespace android {
 
 struct MediaCodecInfo;
 class MemoryDealer;
+class MemoryHeapBase;
 struct OMXCodecObserver;
 struct CodecProfileLevel;
 class SkipCutBuffer;
@@ -60,6 +61,15 @@ struct OMXCodec : public MediaSource,
 
         // Secure decoding mode
         kUseSecureInputBuffers = 256,
+
+        // Disable power saving mode to achieve best performance
+        kDisablePowerSavingMode = 0x00100000,
+
+        // Disable 1080p stream advanced AVsync mechanism
+        kDisableAdvanAVsync1080p = 0x00200000,
+
+        // Enable thumbnail decoding mode will make decoder request minimum pic buffers for decoding
+        kEnableThumbnailDecodingMode = 0x00400000,
     };
     static sp<MediaSource> Create(
             const sp<IOMX> &omx,
@@ -100,6 +110,11 @@ struct OMXCodec : public MediaSource,
         kSupportsMultipleFramesPerInputBuffer = 1024,
         kRequiresLargerEncoderOutputBuffer    = 2048,
         kOutputBuffersAreUnreadable           = 4096,
+
+        /*added by mrvl */
+        kAvoidMemcopyInputRecordingFrames     = 8192,
+        kRequiresBufferPhysicalContinuousOnInputPorts   = 134217728,
+        kRequiresBufferPhysicalContinuousOnOutputPorts  = 268435456,
     };
 
     struct CodecNameAndQuirks {
@@ -129,6 +144,8 @@ private:
 
     // Call this with mLock hold
     void on_message(const omx_message &msg);
+
+    status_t initOutputBufferInfo();
 
     enum State {
         DEAD,
@@ -194,6 +211,7 @@ private:
     size_t mCodecSpecificDataIndex;
 
     sp<MemoryDealer> mDealer[2];
+    sp<MemoryHeapBase> mIOMXHeap[2];
 
     State mState;
     Vector<BufferInfo> mPortBuffers[2];
@@ -207,6 +225,7 @@ private:
     ReadOptions::SeekMode mSeekMode;
     int64_t mTargetTimeUs;
     bool mOutputPortSettingsChangedPending;
+    bool mFirstBufferFilled;
     sp<SkipCutBuffer> mSkipCutBuffer;
 
     MediaBuffer *mLeftOverBuffer;
@@ -243,6 +262,7 @@ private:
     void setComponentRole();
 
     void setAMRFormat(bool isWAMR, int32_t bitRate);
+    void setCOOKFormat(int32_t numChannels, int32_t sampleRate, int32_t frameSize);
 
     status_t setAACFormat(
             int32_t numChannels, int32_t sampleRate, int32_t bitRate,
@@ -358,6 +378,7 @@ private:
     status_t parseAVCCodecSpecificData(
             const void *data, size_t size,
             unsigned *profile, unsigned *level);
+    void setVideoInterlaceInfo();
 
     status_t stopOmxComponent_l();
 
